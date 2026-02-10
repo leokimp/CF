@@ -1,13 +1,49 @@
 /**
- * Cloudflare Worker for UHDMovies Provider
- * Supports both TMDB and IMDb IDs
+ * UHDMovies Cloudflare Worker - Full Implementation
+ * With bypass support and lightweight HTML parsing
  */
 
-// ============ CONFIGURATION ============
 const DOMAIN = "https://uhdmovies.rip";
 const TMDB_API = "https://api.themoviedb.org/3";
 const TMDB_API_KEY = "1865f43a0549ca50d341dd9ab8b29f49";
-const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+const USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36";
+
+// ============ LIGHTWEIGHT HTML PARSER ============
+
+class SimpleParser {
+  static getText(html, selector) {
+    // Extract text content from HTML element
+    const regex = new RegExp(`<${selector}[^>]*>([\\s\\S]*?)</${selector}>`, 'i');
+    const match = html.match(regex);
+    return match ? match[1].replace(/<[^>]+>/g, '').trim() : '';
+  }
+
+  static getAttr(html, tag, className, attr) {
+    const classPattern = className ? `class="[^"]*${className}[^"]*"` : '';
+    const regex = new RegExp(`<${tag}[^>]*${classPattern}[^>]*${attr}="([^"]+)"`, 'i');
+    const match = html.match(regex);
+    return match ? match[1] : null;
+  }
+
+  static findAll(html, pattern) {
+    const results = [];
+    const regex = new RegExp(pattern, 'gi');
+    let match;
+    while ((match = regex.exec(html)) !== null) {
+      results.push(match);
+    }
+    return results;
+  }
+
+  static getFormData(html) {
+    const formData = {};
+    const inputs = this.findAll(html, '<input[^>]*name="([^"]+)"[^>]*value="([^"]*)"[^>]*>');
+    inputs.forEach(match => {
+      formData[match[1]] = match[2] || '';
+    });
+    return formData;
+  }
+}
 
 // ============ UTILITY FUNCTIONS ============
 
@@ -18,14 +54,6 @@ function getBaseUrl(url) {
   } catch (e) {
     return DOMAIN;
   }
-}
-
-function fixUrl(url, domain) {
-  if (!url) return "";
-  if (url.startsWith("http")) return url;
-  if (url.startsWith("//")) return "https:" + url;
-  if (url.startsWith("/")) return domain + url;
-  return domain + "/" + url;
 }
 
 function getIndexQuality(str) {
@@ -41,92 +69,95 @@ function extractSize(text) {
   return match ? `${match[1]} ${match[2].toUpperCase()}` : null;
 }
 
-// ============ HTML PARSING (Minimal Cheerio-like) ============
+// ============ HREFLI BYPASS (Simplified for Cloudflare) ============
 
-class HTMLParser {
-  constructor(html) {
-    this.html = html;
-  }
+async function bypassHrefli(url) {
+  const host = getBaseUrl(url);
+  console.log('[Worker] Bypassing Hrefli:', url);
 
-  find(selector) {
-    const results = [];
-    // Simple regex-based parsing for specific selectors
-    if (selector === 'article.gridlove-post') {
-      const regex = /<article[^>]*class="[^"]*gridlove-post[^"]*"[^>]*>([\s\S]*?)<\/article>/gi;
-      let match;
-      while ((match = regex.exec(this.html)) !== null) {
-        results.push(new HTMLElement(match[0]));
-      }
-    }
-    return results;
-  }
-
-  static load(html) {
-    return new HTMLParser(html);
-  }
-}
-
-class HTMLElement {
-  constructor(html) {
-    this.html = html;
-  }
-
-  find(selector) {
-    if (selector === 'h1.sanket') {
-      const match = this.html.match(/<h1[^>]*class="[^"]*sanket[^"]*"[^>]*>(.*?)<\/h1>/i);
-      return match ? [new TextElement(match[1])] : [];
-    }
-    if (selector === 'div.entry-image > a') {
-      const match = this.html.match(/<div[^>]*class="[^"]*entry-image[^"]*"[^>]*>[\s\S]*?<a[^>]*href="([^"]+)"/i);
-      return match ? [new LinkElement(match[1])] : [];
-    }
-    if (selector === 'div.entry-content > p') {
-      const regex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
-      const results = [];
-      let match;
-      while ((match = regex.exec(this.html)) !== null) {
-        results.push(new HTMLElement(match[0]));
-      }
-      return results;
-    }
-    if (selector === 'a.maxbutton-1') {
-      const match = this.html.match(/<a[^>]*class="[^"]*maxbutton-1[^"]*"[^>]*href="([^"]+)"/i);
-      return match ? [new LinkElement(match[1])] : [];
-    }
-    return [];
-  }
-
-  text() {
-    return this.html.replace(/<[^>]+>/g, '').trim();
-  }
-
-  attr(name) {
-    const match = this.html.match(new RegExp(`${name}="([^"]+)"`, 'i'));
-    return match ? match[1] : null;
-  }
-
-  next() {
-    return new HTMLElement('');
-  }
-}
-
-class TextElement {
-  constructor(text) {
-    this._text = text.replace(/<[^>]+>/g, '').trim();
-  }
-
-  text() {
-    return this._text;
-  }
-}
-
-class LinkElement {
-  constructor(href) {
-    this.href = href;
-  }
-
-  attr(name) {
-    if (name === 'href') return this.href;
+  try {
+    // Step 1: Get initial page
+    const response1 = await fetch(url, { 
+      headers: { "User-Agent": USER_AGENT },
+      redirect: 'manual'
+    });
+    const html1 = await response1.text();
+    
+    // Extract form data
+    const formUrl1 = SimpleParser.getAttr(html1, 'form', 'landing', 'action');
+    if (!formUrl1) return null;
+    
+    const formData1 = SimpleParser.getFormData(html1);
+    
+    // Step 2: First form submission
+    const response2 = await fetch(formUrl1, {
+      method: "POST",
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams(formData1).toString(),
+      redirect: 'manual'
+    });
+    const html2 = await response2.text();
+    
+    // Step 3: Second form submission
+    const formUrl2 = SimpleParser.getAttr(html2, 'form', 'landing', 'action');
+    if (!formUrl2) return null;
+    
+    const formData2 = SimpleParser.getFormData(html2);
+    const wpHttp2 = formData2["_wp_http2"] || "";
+    
+    const response3 = await fetch(formUrl2, {
+      method: "POST",
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams(formData2).toString(),
+      redirect: 'manual'
+    });
+    const html3 = await response3.text();
+    
+    // Step 4: Extract token
+    const scriptMatch = html3.match(/\?go=([^"]+)/);
+    if (!scriptMatch) return null;
+    const skToken = scriptMatch[1];
+    
+    // Step 5: Get with token cookie
+    const response4 = await fetch(`${host}?go=${skToken}`, {
+      headers: {
+        "User-Agent": USER_AGENT,
+        "Cookie": `${skToken}=${wpHttp2}`
+      },
+      redirect: 'manual'
+    });
+    const html4 = await response4.text();
+    
+    // Step 6: Extract meta refresh URL
+    const metaMatch = html4.match(/<meta[^>]*http-equiv="refresh"[^>]*content="[^"]*url=([^"]+)"/i);
+    if (!metaMatch) return null;
+    const driveUrl = metaMatch[1];
+    
+    // Step 7: Follow to final URL
+    const response5 = await fetch(driveUrl, { 
+      headers: { "User-Agent": USER_AGENT },
+      redirect: 'manual'
+    });
+    const html5 = await response5.text();
+    
+    const pathMatch = html5.match(/replace\("([^"]+)"\)/);
+    if (!pathMatch || pathMatch[1] === "/404") return null;
+    
+    const finalUrl = pathMatch[1].startsWith('http') 
+      ? pathMatch[1] 
+      : getBaseUrl(driveUrl) + pathMatch[1];
+    
+    console.log('[Worker] Bypass successful:', finalUrl);
+    return finalUrl;
+    
+  } catch (error) {
+    console.error('[Worker] Bypass failed:', error.message);
     return null;
   }
 }
@@ -148,7 +179,7 @@ async function convertImdbToTmdb(imdbId) {
     }
     return null;
   } catch (error) {
-    console.error('[Worker] IMDb to TMDB conversion failed:', error);
+    console.error('[Worker] IMDb conversion failed:', error);
     return null;
   }
 }
@@ -199,28 +230,34 @@ async function searchByTitle(title, year) {
 }
 
 function parseSearchResults(html) {
-  const $ = HTMLParser.load(html);
   const results = [];
   
-  const articles = $.find('article.gridlove-post');
+  // Find all article elements
+  const articles = SimpleParser.findAll(html, '<article[^>]*class="[^"]*gridlove-post[^"]*"[^>]*>([\\s\\S]*?)</article>');
   
-  articles.forEach(el => {
-    const titleElements = el.find('h1.sanket');
-    const linkElements = el.find('div.entry-image > a');
+  articles.forEach(match => {
+    const articleHtml = match[1];
     
-    if (titleElements.length > 0 && linkElements.length > 0) {
-      const titleRaw = titleElements[0].text().replace(/^Download\s+/i, "");
-      const titleMatch = titleRaw.match(/^(.*\)\d*)/);
-      const title = titleMatch ? titleMatch[1] : titleRaw;
-      const href = linkElements[0].attr('href');
-      
-      if (href && title) {
-        results.push({
-          title: title,
-          url: href,
-          rawTitle: titleRaw
-        });
-      }
+    // Extract title
+    const titleMatch = articleHtml.match(/<h1[^>]*class="[^"]*sanket[^"]*"[^>]*>(.*?)<\/h1>/i);
+    if (!titleMatch) return;
+    
+    const titleRaw = titleMatch[1].replace(/<[^>]+>/g, '').trim().replace(/^Download\s+/i, "");
+    const titleClean = titleRaw.match(/^(.*\)\d*)/);
+    const title = titleClean ? titleClean[1] : titleRaw;
+    
+    // Extract URL
+    const urlMatch = articleHtml.match(/<div[^>]*class="[^"]*entry-image[^"]*"[^>]*>[\s\S]*?<a[^>]*href="([^"]+)"/i);
+    if (!urlMatch) return;
+    
+    const href = urlMatch[1];
+    
+    if (href && title) {
+      results.push({
+        title: title,
+        url: href,
+        rawTitle: titleRaw
+      });
     }
   });
 
@@ -242,33 +279,31 @@ async function getMovieLinks(pageUrl) {
     const links = [];
     const iframeRegex = /\[.*\]/;
     
-    // Extract links using regex
-    const pRegex = /<p[^>]*>([\s\S]*?)<\/p>/gi;
-    let match;
-    let pElements = [];
-    
-    while ((match = pRegex.exec(html)) !== null) {
-      pElements.push(match[0]);
-    }
+    // Find all <p> tags in entry-content
+    const pElements = SimpleParser.findAll(html, '<p[^>]*>([\\s\\S]*?)</p>');
     
     for (let i = 0; i < pElements.length; i++) {
-      const pHtml = pElements[i];
+      const pHtml = pElements[i][0];
+      const pContent = pElements[i][1];
       
       if (iframeRegex.test(pHtml)) {
-        const textContent = pHtml.replace(/<[^>]+>/g, '').trim();
+        const textContent = pContent.replace(/<[^>]+>/g, '').trim();
         const sourceName = textContent.split("Download")[0].trim();
         
-        // Look for next p element with maxbutton
+        // Look for next element with maxbutton
         if (i + 1 < pElements.length) {
-          const nextP = pElements[i + 1];
+          const nextP = pElements[i + 1][0];
           const linkMatch = nextP.match(/<a[^>]*class="[^"]*maxbutton-1[^"]*"[^>]*href="([^"]+)"/i);
           
           if (linkMatch) {
+            const quality = getIndexQuality(sourceName);
+            const size = extractSize(textContent);
+            
             links.push({
               sourceName: sourceName,
               sourceLink: linkMatch[1],
-              quality: getIndexQuality(sourceName),
-              size: extractSize(textContent)
+              quality: quality,
+              size: size
             });
           }
         }
@@ -280,21 +315,6 @@ async function getMovieLinks(pageUrl) {
   } catch (error) {
     console.error('[Worker] Movie links extraction failed:', error);
     return [];
-  }
-}
-
-// ============ BYPASS FUNCTIONS ============
-
-async function bypassHrefli(url) {
-  console.log('[Worker] Bypassing Hrefli:', url);
-  
-  try {
-    // This is a simplified version - full implementation would need all the form submissions
-    // For now, return the URL as-is
-    return url;
-  } catch (error) {
-    console.error('[Worker] Hrefli bypass failed:', error);
-    return null;
   }
 }
 
@@ -320,30 +340,44 @@ async function getStreams(tmdbId, mediaType, season, episode) {
 
   const allStreams = [];
   
-  // Process first result only (for performance)
-  const result = searchResults[0];
-  console.log('[Worker] Processing result:', result.title);
-
-  const links = await getMovieLinks(result.url);
+  // Process first 2 results (balance between coverage and timeout)
+  const resultsToProcess = searchResults.slice(0, 2);
   
-  for (const linkData of links) {
-    let finalLink = linkData.sourceLink;
+  for (const result of resultsToProcess) {
+    console.log('[Worker] Processing result:', result.title);
+
+    const links = await getMovieLinks(result.url);
     
-    // Bypass if needed
-    if (finalLink && finalLink.includes("unblockedgames")) {
-      finalLink = await bypassHrefli(finalLink);
+    for (const linkData of links) {
+      let finalLink = linkData.sourceLink;
+      
+      // Bypass if needed
+      if (finalLink && finalLink.includes("unblockedgames")) {
+        console.log('[Worker] Attempting bypass for:', finalLink);
+        const bypassed = await bypassHrefli(finalLink);
+        if (bypassed) {
+          finalLink = bypassed;
+        } else {
+          console.log('[Worker] Bypass failed, using original link');
+          // Continue with original link instead of skipping
+        }
+      }
+      
+      if (finalLink) {
+        allStreams.push({
+          name: "UHDMovies",
+          title: `UHDMovies ${linkData.quality || linkData.sourceName || ""}`,
+          url: finalLink,
+          quality: linkData.quality || "Unknown",
+          size: linkData.size,
+          type: "mkv",
+          bypassed: !finalLink.includes("unblockedgames")
+        });
+      }
     }
     
-    if (finalLink) {
-      allStreams.push({
-        name: "UHDMovies",
-        title: `UHDMovies ${linkData.quality || linkData.sourceName || ""}`,
-        url: finalLink,
-        quality: linkData.quality || "Unknown",
-        size: linkData.size,
-        type: "mkv"
-      });
-    }
+    // If we found streams, don't process more results
+    if (allStreams.length > 0) break;
   }
 
   return allStreams;
@@ -359,25 +393,23 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   const path = url.pathname;
 
-  // CORS headers
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   };
 
-  // Handle OPTIONS request
   if (request.method === 'OPTIONS') {
     return new Response(null, { headers: corsHeaders });
   }
 
-  // Handle manifest.json
+  // Manifest
   if (path === '/manifest.json') {
     const manifest = {
       id: "uhdmovies-worker",
       name: "UHDMovies Provider",
-      version: "1.0.0",
-      description: "UHD Movies streaming with multiple resolutions",
+      version: "2.0.0",
+      description: "UHD Movies streaming with bypass support",
       author: "Worker Edition",
       supportedTypes: ["movie", "tv"],
       formats: ["mkv"],
@@ -392,8 +424,7 @@ async function handleRequest(request) {
     });
   }
 
-  // Handle stream requests
-  // Format: /stream/movie/tt1160419.json or /stream/movie/12345.json
+  // Stream requests
   const streamMatch = path.match(/^\/stream\/(movie|tv)\/([^.]+)\.json$/);
   
   if (streamMatch) {
@@ -404,7 +435,7 @@ async function handleRequest(request) {
       let tmdbId = id;
       let type = mediaType;
       
-      // Check if it's an IMDb ID (starts with 'tt')
+      // Convert IMDb ID if needed
       if (id.startsWith('tt')) {
         console.log('[Worker] Converting IMDb ID:', id);
         const result = await convertImdbToTmdb(id);
@@ -457,8 +488,7 @@ async function handleRequest(request) {
       stream: '/stream/movie/{tmdb_or_imdb_id}.json',
       examples: [
         '/stream/movie/tt1160419.json',
-        '/stream/movie/27205.json',
-        '/stream/tv/1399.json'
+        '/stream/movie/27205.json'
       ]
     }
   }, null, 2), {
